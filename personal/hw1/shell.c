@@ -22,6 +22,7 @@
 
 
 void get_paths(char** paths);
+void flush_stdin(void);
 
 int cmd_quit(tok_t arg[]) {
   printf("Bye\n");
@@ -60,13 +61,12 @@ fun_desc_t cmd_table[] = {
 int cmd_fg(tok_t arg[]) {
     pid_t target;
 
-    target = arg[1];
-    if (target == NULL)
-        target = most_recent_process;
+    target = arg[1] != NULL ? (pid_t) *arg[1] : most_recent_process;
     printf("Set pid: %d to foreground...\n", target);
     tcsetpgrp(0, target);
     // And resume the process if it's stopped
     kill(target, SIGCONT);
+    return 1;
 }
 
 int cmd_bg(tok_t arg[]) {
@@ -74,6 +74,7 @@ int cmd_bg(tok_t arg[]) {
 
     shell_pgid = getpgrp();
     tcsetpgrp(shell_terminal, shell_pgid);
+    return 1;
 }
 
 int cmd_wait(tok_t arg[]) {
@@ -81,6 +82,8 @@ int cmd_wait(tok_t arg[]) {
         waitpid(-1, NULL, 0);
         child_process_count--;
     }
+    flush_stdin();
+    return 1;
 }
 
 int cmd_help(tok_t arg[]) {
@@ -108,6 +111,7 @@ int cmd_cd(tok_t arg[]){
     else {
         perror("chdir() error");
     }
+    return 1;
 }
 int lookup(char cmd[]) {
   int i;
@@ -189,29 +193,25 @@ void shift_string(char *str[],int i){
 int shell (int argc, char *argv[]) {
   char *s = malloc(INPUT_STRING_SIZE+1);			/* user input string */
   int signals[] = {SIGINT, SIGQUIT, SIGKILL, SIGTERM, SIGTSTP, SIGCONT,
-      SIGTTIN, SIGTTOU, -1};
-	char concat_s[1024];
-	char cwd[1024];
-	char *path;
+    SIGTTIN, SIGTTOU, -1};
+  char cwd[1024];
   tok_t *t;			/* tokens parsed from input */
-	tok_t *path_token;
   int lineNum = 0;
   int fundex = -1;
-	int status;
-	int i;
+  int status;
+  int i;
   pid_t pid = getpid();		/* get current processes PID */
   pid_t ppid = getppid();	/* get parents PID */
-  pid_t cpid, tcpid, cpgid;
-	struct stat file_stat;
-	process* first_process = NULL;
-    char* paths[256];
-    char buf[256];
-    tok_t original_t;
-    tok_t* args;
+  pid_t cpid;
+  process* first_process = NULL;
+  char* paths[256];
+  char buf[256];
+  tok_t original_t;
+  tok_t* args;
 
-    get_paths(paths);
-    int pfd = -1;
-    int inpfd = -1;
+  get_paths(paths);
+  int pfd = -1;
+  int inpfd = -1;
   init_shell();
 
   printf("%s running as PID %d under %d\n",argv[0],pid,ppid);
@@ -308,7 +308,7 @@ int shell (int argc, char *argv[]) {
                     dup2(inpfd, STDIN_FILENO);
                 }
                 original_t = t[0];
-                for (i = 0 ; paths[i] != "\0" ; i++) {
+                for (i = 0 ; strcmp(paths[i], "\0") != 0 ; i++) {
                     snprintf(buf, sizeof(buf), "%s/%s", paths[i], original_t);
                     t[0] = buf;
                     if (execv(buf, args) == 0)
@@ -330,18 +330,20 @@ int shell (int argc, char *argv[]) {
                 child_process_count++;
                 printf("parent pgid: %d\n", getpgrp());
                 // wait if program not run in background (without & token)
-                if (!run_in_background)
-                    wait(&status);
+                wait(&status);
+                flush_stdin();
             }
         }
 
         // set shell to foreground
         tcsetpgrp(0, getpgrp());
-        // printf("exit\n");
 
         // catch all signals again
         for (i = 0 ; signals[i] != -1; i++) {
-            sigaction(signals[i], SIG_DFL, NULL);
+            struct sigaction sigact;
+
+            sigact.sa_handler = SIG_DFL;
+            sigaction(signals[i], &sigact, NULL);
         }
 
         fprintf(stdout, "%d: ", lineNum++);
@@ -378,4 +380,9 @@ void get_paths(char** paths){
     }
     *(paths + (k++)) = p;
     *(paths + k) = "\0";
+}
+
+void flush_stdin(void) {
+    int c;
+    while((c = getchar()) != EOF);
 }
