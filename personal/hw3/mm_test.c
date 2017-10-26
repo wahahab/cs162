@@ -5,10 +5,12 @@
 int main(int argc, char **argv)
 {
     int *data;
+    int i;
 
-    data = (int*) mm_malloc(4);
-    data[0] = 1;
-    mm_free(data);
+    for (i = 1; i < 1024; i++) {
+        data = (int*) mm_malloc(i);
+        data[0] = 1;
+    }
     printf("malloc sanity test successful!\n");
     return 0;
 }
