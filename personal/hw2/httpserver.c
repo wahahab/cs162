@@ -84,17 +84,24 @@ void not_found_res(int fd) {
 void response_file(int fd, char *file_path) {
     char file_buff[BUFF_SIZE];
     FILE *f  = fopen(file_path, "r");
+    int fsize;
+    char fsize_str[BUFF_SIZE];
 
     if (f == NULL) 
         return not_found_res(fd);
+    fseek(f, 0, SEEK_END);
+    fsize = ftell(f);
+    rewind(f);
     http_start_response(fd, 200);
-    http_send_header(fd, "Content-type",
+    http_send_header(fd, "Content-Type",
             http_get_mime_type(file_path));
     http_send_header(fd, "Server", "httpserver/1.0");
+    sprintf(fsize_str, "%d", fsize);
+    http_send_header(fd, "Content-Length", fsize_str);
     http_end_headers(fd);
     while(!feof(f)) {
-        fgets(file_buff, BUFF_SIZE, f);
-        // printf("%s", file_buff);
+        memset(file_buff, '\0', BUFF_SIZE);
+        fread(file_buff, 1, BUFF_SIZE, f);
         http_send_string(fd, file_buff);
     }
     close(fd);
@@ -115,7 +122,6 @@ void handle_files_request(int fd)
     char res_buffer[BUFF_SIZE];
     DIR *dp;
     struct dirent *ep;
-    struct hostent* server;
 
     if (request == NULL) {
         return internal_error_res(fd);
@@ -127,15 +133,24 @@ void handle_files_request(int fd)
         return response_file(fd, file_path);
     } else if (is_Directory(file_path)) {
         strcpy(dir_path, file_path);
+        if (*(file_path + strlen(file_path) - 1) != '/')
+            strcat(file_path, "/");
         strcat(file_path, "index.html");
         // index.html not exist
         if (fopen(file_path, "r") == NULL) {
             dp = opendir(dir_path);
             strcpy(res_buffer, "<html><body><ul>");
-            while(ep = readdir(dp)) {
+            if (strcmp(request->path, "/") != 0)
+                strcat(res_buffer, "<li><a href=\"..\">..</a></li>");
+            while((ep = readdir(dp))) {
+                // pass current path
+                if (strcmp(ep->d_name, ".") == 0 || strcmp(ep->d_name, "..") == 0)
+                    continue;
                 char link_buffer[BUFF_SIZE];
 
                 strcpy(file_path, request->path);
+                if (*(request->path + strlen(request->path) - 1) != '/')
+                    strcat(file_path, "/");
                 strcat(file_path, ep->d_name);
                 sprintf(link_buffer,
                         "<li><a href=\"%s\">%s</a></li>",
@@ -153,6 +168,25 @@ void handle_files_request(int fd)
     printf("Path: %s\n", request->path);
 }
 
+void check_host_and_replace (char* req, char* buff) {
+    char* hostp = strstr(req, "Host: ");
+    char new_host[BUFF_SIZE];
+    char* next_hp;
+
+    memset(buff, 0, BUFF_SIZE);
+    memset(new_host, 0, BUFF_SIZE);
+    if (hostp == NULL) {
+        strcpy(buff, req);
+        return; 
+    }
+    strncpy(buff, req, hostp - req);
+    sprintf(new_host, "Host: %s:%d\r\n", server_proxy_hostname, server_proxy_port);
+    strcat(buff, new_host);
+    next_hp = strstr(hostp, "\n");
+    printf("next_hp: %s\n", next_hp);
+    strcat(buff, next_hp + 1);
+}
+
 /*
  * Opens a connection to the proxy target (hostname=server_proxy_hostname and
  * port=server_proxy_port) and relays traffic to/from the stream fd and the
@@ -166,70 +200,71 @@ void handle_files_request(int fd)
  */
 void handle_proxy_request(int fd)
 {
-    struct sockaddr_in dest;
-    int socketfd;
-    char buff[BUFF_SIZE];
-    struct addrinfo *ai;
+    struct addrinfo* ai;
+    char port_str[8];
     struct addrinfo hints;
-    char port_string[BUFF_SIZE];
-    struct hostent* server;
-    char* msg;
-    char* hostp;
-    char new_hostp[BUFF_SIZE];
-    char* next_headerp;
-    char buffcpy[BUFF_SIZE * 2];
-    char* buffcpy_start;
-    int i;
-    char* request_data;
+    int server_sockfd;
+    fd_set rfds;
+    struct timeval tv;
+    int is_connect_loss = 0;
 
-    memset(&dest, 0, sizeof(dest));
-    server = gethostbyname(server_proxy_hostname);
-    if (server == NULL)
-        perror("can not get hostname\n");
-    dest.sin_port = htons(server_proxy_port);
-    dest.sin_family = AF_INET;
-    memcpy(&dest.sin_addr, server->h_addr, server->h_length);
-    socketfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (socketfd < 0) perror("socket() error\n");
-    int socket_option = 1;
-    if (connect(socketfd, (struct sockaddr*) &dest, sizeof(struct sockaddr_in)) < 0)
-        perror("connect() error\n");
-    while(1) {
-        memset(buff, 0, sizeof(buff));
-        int bread = read(fd, buff, sizeof(buff));
-        if (bread == 0)
-            break;
-        char* send_buff = &buff[0];
-        if ((hostp = strstr(buff, "Host:")) != NULL) {
-            for(i = 0 ; (buff + i) != hostp ; i++) {
-                *(buffcpy + i) = *(buff + i);
-            }
-            *(buffcpy + i) = '\0';
-            sprintf(new_hostp, "Host: %s:%d\r\n", server_proxy_hostname, server_proxy_port);
-            strcat(buffcpy, new_hostp);
-            next_headerp = strstr(hostp, "\n") + 1;
-            strcat(buffcpy, next_headerp);
-            send_buff = buffcpy;
-        }
-        printf("%s", send_buff);
-        write(socketfd, send_buff, bread);
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_protocol = 0;
+    hints.ai_flags = 0;
+    sprintf(port_str, "%d", server_proxy_port);
+    int errorno;
+    if ((errorno = getaddrinfo(server_proxy_hostname, port_str,
+                &hints, &ai)) != 0) {
+        perror("getaddrinfo() fail\n");
+        fprintf(stderr, "Error: %s\n", gai_strerror(errorno));
     }
+    server_sockfd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+    if (connect(server_sockfd, ai->ai_addr, ai->ai_addrlen) != 0)
+        perror("connect() fail\n");
     while (1) {
-        memset(&buff, 0, sizeof(buff));
-        int bytes_read = read(socketfd, buff, sizeof(buff));
-        if (bytes_read == 0)
+        FD_ZERO(&rfds);
+        FD_SET(fd, &rfds);
+        FD_SET(server_sockfd, &rfds);
+        tv.tv_sec = 15;
+        tv.tv_usec = 0;
+        int nfds = (server_sockfd > fd ? server_sockfd: fd) + 1;
+        int ret = select(nfds, &rfds, NULL, NULL, &tv);
+        if (ret > 0) {
+            int readfd;
+            int writefd;
+            int readbyte;
+            char buff[BUFF_SIZE];
+
+            memset(buff, 0, BUFF_SIZE);
+            if (FD_ISSET(fd, &rfds)) {
+                readfd = fd;
+                writefd = server_sockfd;
+            } else if (FD_ISSET(server_sockfd, &rfds)) {
+                readfd = server_sockfd;
+                writefd = fd;
+            }
+            while((readbyte = read(readfd, buff, BUFF_SIZE)) > 0) {
+                char sendbuff[BUFF_SIZE];
+
+                check_host_and_replace(buff, sendbuff);
+                printf("%s", sendbuff);
+                if (write(writefd, sendbuff, readbyte) == -1) {
+                    is_connect_loss = 1;
+                    break;
+                }
+                memset(buff, 0, BUFF_SIZE);
+            }
+        }
+        else if (ret == 0)
+            perror("Timeout!\n");
+        else
+            perror("select() fail\n");
+        if (is_connect_loss)
             break;
-        write(fd, buff, bytes_read);
-    }
-    return ;
-    while(read(fd, buff, sizeof(buff)) > 0) {
-    }
-    printf("Sent\n");
-    while(read(socketfd, buff, sizeof(buff)) > 0) {
-        printf("%s", buff);
-        write(fd, buff, sizeof(buff));
     }
     close(fd);
+    close(server_sockfd);
 }
 
 /*
