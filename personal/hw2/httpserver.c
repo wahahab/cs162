@@ -169,7 +169,7 @@ void handle_files_request(int fd)
 }
 
 void check_host_and_replace (char* req, char* buff) {
-    char* hostp = strstr(req, "Host: ");
+    char* hostp = strstr(req, "Host:");
     char new_host[BUFF_SIZE];
     char* next_hp;
 
@@ -183,7 +183,6 @@ void check_host_and_replace (char* req, char* buff) {
     sprintf(new_host, "Host: %s:%d\r\n", server_proxy_hostname, server_proxy_port);
     strcat(buff, new_host);
     next_hp = strstr(hostp, "\n");
-    printf("next_hp: %s\n", next_hp);
     strcat(buff, next_hp + 1);
 }
 
@@ -222,14 +221,11 @@ void handle_proxy_request(int fd)
     server_sockfd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
     if (connect(server_sockfd, ai->ai_addr, ai->ai_addrlen) != 0)
         perror("connect() fail\n");
+    FD_ZERO(&rfds);
+    FD_SET(fd, &rfds);
+    FD_SET(server_sockfd, &rfds);
     while (1) {
-        FD_ZERO(&rfds);
-        FD_SET(fd, &rfds);
-        FD_SET(server_sockfd, &rfds);
-        tv.tv_sec = 15;
-        tv.tv_usec = 0;
-        int nfds = (server_sockfd > fd ? server_sockfd: fd) + 1;
-        int ret = select(nfds, &rfds, NULL, NULL, &tv);
+        int ret = select(FD_SETSIZE, &rfds, NULL, NULL, NULL);
         if (ret > 0) {
             int readfd;
             int writefd;
@@ -248,18 +244,21 @@ void handle_proxy_request(int fd)
                 char sendbuff[BUFF_SIZE];
 
                 check_host_and_replace(buff, sendbuff);
-                printf("%s", sendbuff);
-                if (write(writefd, sendbuff, readbyte) == -1) {
+                if (write(writefd, sendbuff, strlen(sendbuff)) == -1) {
                     is_connect_loss = 1;
                     break;
                 }
+                fwrite(sendbuff, 1, strlen(sendbuff), stdout);
                 memset(buff, 0, BUFF_SIZE);
+                memset(sendbuff, 0, BUFF_SIZE);
             }
         }
         else if (ret == 0)
             perror("Timeout!\n");
-        else
+        else {
+            is_connect_loss = 1;
             perror("select() fail\n");
+        }
         if (is_connect_loss)
             break;
     }
