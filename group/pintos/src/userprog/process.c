@@ -21,6 +21,7 @@
 
 static struct semaphore temporary;
 static thread_func start_process NO_RETURN;
+static void get_fname(const char *cmdline, char *fname);
 static bool load (const char *cmdline, void (**eip) (void), void **esp);
 
 /* Starts a new thread running a user program loaded from
@@ -32,6 +33,10 @@ process_execute (const char *file_name)
 {
   char *fn_copy;
   tid_t tid;
+  char fname[1024];
+  struct start_info si;
+
+  get_fname(file_name, fname);
 
   sema_init (&temporary, 0);
   /* Make a copy of FILE_NAME.
@@ -42,21 +47,28 @@ process_execute (const char *file_name)
   strlcpy (fn_copy, file_name, PGSIZE);
 
   /* Create a new thread to execute FILE_NAME. */
-  tid = thread_create (file_name, PRI_DEFAULT, start_process, fn_copy);
+  si.cmd = fn_copy;
+  sema_init(&si.sema, 0);
+  tid = thread_create (fname, PRI_DEFAULT, start_process, &si);
   if (tid == TID_ERROR)
     palloc_free_page (fn_copy);
+  sema_down(&si.sema);
+  if (!si.success)
+      tid = TID_ERROR;
   return tid;
 }
 
 /* A thread function that loads a user process and starts it
    running. */
 static void
-start_process (void *file_name_)
+start_process (void *si_)
 {
-  char *file_name = file_name_;
+  struct start_info *si = si_;
+  char *file_name = si->cmd;
   struct intr_frame if_;
   bool success;
 
+  // printf("file_name: %s\n", file_name);
   /* Initialize interrupt frame and load executable. */
   memset (&if_, 0, sizeof if_);
   if_.gs = if_.fs = if_.es = if_.ds = if_.ss = SEL_UDSEG;
@@ -68,6 +80,9 @@ start_process (void *file_name_)
   palloc_free_page (file_name);
   if (!success)
     thread_exit ();
+    
+  si->success = success;
+  sema_up(&si->sema);
 
   /* Start the user process by simulating a return from an
      interrupt, implemented by intr_exit (in
@@ -129,6 +144,8 @@ process_activate (void)
 {
   struct thread *t = thread_current ();
 
+  if (strcmp(t->name, "main") == 0)
+      return;
   /* Activate thread's page tables. */
   pagedir_activate (t->pagedir);
 
@@ -206,6 +223,29 @@ static bool load_segment (struct file *file, off_t ofs, uint8_t *upage,
                           uint32_t read_bytes, uint32_t zero_bytes,
                           bool writable);
 
+void
+get_fname(const char *file_name, char *fname)
+{
+  int i;
+  int j;
+  int inword;
+
+  // seperate file name and arguments
+  i = 0;
+  j = 0;
+  inword = 0;
+  while(*(file_name + i) != '\0' && !(inword && *(file_name + i) == ' '))
+  {
+    if (*(file_name + i) != ' ') {
+        fname[j] = *(file_name + i);
+        j++;
+        inword = 1;
+    }
+    i++;
+  }
+  fname[j] = '\0';
+}
+
 /* Loads an ELF executable from FILE_NAME into the current thread.
    Stores the executable's entry point into *EIP
    and its initial stack pointer into *ESP.
@@ -219,7 +259,10 @@ load (const char *file_name, void (**eip) (void), void **esp)
   off_t file_ofs;
   bool success = false;
   int i;
+  char fname[1024];
 
+  get_fname(file_name, fname);
+    
   /* Allocate and activate page directory. */
   t->pagedir = pagedir_create ();
   if (t->pagedir == NULL)
@@ -227,10 +270,10 @@ load (const char *file_name, void (**eip) (void), void **esp)
   process_activate ();
 
   /* Open executable file. */
-  file = filesys_open (file_name);
+  file = filesys_open (fname);
   if (file == NULL)
     {
-      printf ("load: %s: open failed\n", file_name);
+      printf ("load: %s: open failed\n", fname);
       goto done;
     }
 
@@ -307,8 +350,55 @@ load (const char *file_name, void (**eip) (void), void **esp)
     }
 
   /* Set up stack. */
-  if (!setup_stack (esp))
+  if (!setup_stack (esp)) {
     goto done;
+  }
+  
+  // set up args
+  void* sp = *esp;
+  int argc = 0;
+  char *args[64];
+  int inword;
+
+  i = 0;
+  inword = 0;
+  while(*(file_name + i) != '\0')
+      i++;
+  i--;
+  while(i >= 0) {
+    if (*(file_name + i) == ' ') {
+        if (inword) {
+            args[argc] = (char*)sp;
+            argc++;
+        }
+        inword = 0;
+    }
+    else {
+        if (!inword)
+            *(char*)(--sp) = '\0';
+        inword = 1;
+        *(char*)(--sp) = *(file_name + i);
+    }
+    i--;
+  }
+  if (inword) {
+      args[argc] = (char*)sp;
+      argc++;
+  }
+  *(uint8_t*)(--sp) = 0;
+  sp -= 4;
+  *(char**)sp = NULL;
+  for (i = 0 ; i < argc ; i ++) {
+      sp -= 4;
+      *(char**)sp = args[i];
+  }
+  sp -= 4;
+  *(char***) sp = (char**)(sp + 4);
+  sp -= 4;
+  *(int*) sp = argc;
+  sp -= 4;
+  *(void**) sp = NULL;
+  *(void**) esp = sp;
 
   /* Start address. */
   *eip = (void (*) (void)) ehdr.e_entry;
@@ -467,4 +557,95 @@ install_page (void *upage, void *kpage, bool writable)
      address, then map our page there. */
   return (pagedir_get_page (t->pagedir, upage) == NULL
           && pagedir_set_page (t->pagedir, upage, kpage, writable));
+}
+
+bool fd_cmp_func (const struct list_elem *a,
+        const struct list_elem *b,
+        UNUSED void *aux)
+{
+    struct file_fd *ffda = list_entry(a, struct file_fd, elem);
+    struct file_fd *ffdb = list_entry(b, struct file_fd, elem);
+
+    return ffda->fd < ffdb->fd;
+}
+
+struct file_fd*
+get_filefd_from_fd(int fd)
+{
+    struct thread *t = thread_current();
+    struct list_elem *e;
+    struct file_fd *ffd;
+
+    for (e = list_head(&t->fds);
+            e != list_end(&t->fds);
+            e = list_next(e)) {
+        ffd = list_entry(e, struct file_fd, elem);
+        if (ffd->fd == fd)
+            return ffd;
+    }
+    return NULL;
+}
+
+int
+process_getfd(struct thread *t)
+{
+    int fd = 2;
+    struct list_elem *e;
+    struct file_fd *ffd;
+
+    for (e = list_begin(&t->fds);
+            e != list_end(&t->fds);
+            e = list_next(e))
+    {
+        ffd = list_entry(e, struct file_fd, elem);
+        if(ffd->fd != fd)
+            return fd;
+        fd++;
+    }
+    return fd;
+}
+
+int
+process_file_size(int fd)
+{
+    struct file_fd *ffd = get_filefd_from_fd(fd);
+
+    if (ffd == NULL)
+        return -1;
+    return file_length(ffd->f);
+}
+
+int
+process_open_file(char *fname) {
+    struct file *file;
+    struct file_fd *ffd;
+    struct thread *t = thread_current();
+
+    file = filesys_open(fname);
+    if (file == NULL) {
+        return -1;
+    }
+    ffd = malloc(sizeof(struct file_fd));
+    ffd->f = file;
+    ffd->fd = process_getfd(t);
+    ffd->offset = 0;
+    list_insert_ordered(&t->fds, &ffd->elem,
+            fd_cmp_func, NULL);
+    return ffd->fd;
+}
+
+int
+process_read_file(uint32_t *args)
+{
+    int fd = *(args + 1);
+    char *buff = *(args + 2);
+    unsigned size = *(args + 3);
+    struct file_fd *ffd = get_filefd_from_fd(fd);
+    int bytes_read = 0;
+    
+    if (ffd == NULL)
+        return -1;
+    bytes_read = file_read_at(ffd->f, buff, size, ffd->offset);
+    ffd->offset += bytes_read;
+    return bytes_read;
 }

@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include "threads/synch.h"
 #include "threads/fixed-point.h"
+#include "filesys/off_t.h"
 
 /* States in a thread's life cycle. */
 enum thread_status
@@ -108,7 +109,16 @@ struct thread
     int nice;
     fixed_point_t recent_cpu;
     struct list_elem mlfqs_elem;
+    struct thread* parent;
+    struct list fds;
   };
+
+struct file_fd {
+    int fd;
+    struct file* f;
+    off_t offset;
+    struct list_elem elem;
+};
 
 // Struct for manage sleeping threads
 struct sleep_thread_entry {
@@ -156,6 +166,13 @@ int thread_get_nice (void);
 void thread_set_nice (int);
 int thread_get_recent_cpu (void);
 int thread_get_load_avg (void);
+int get_fd(struct thread *t);
+bool fd_cmp_func (const struct list_elem *a,
+        const struct list_elem *b,
+        UNUSED void *aux);
+void
+fds_init(struct list *fds);
+
 
 void mlfqs_update (int64_t current_ticks);
 

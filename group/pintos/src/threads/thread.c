@@ -8,6 +8,7 @@
 #include "threads/interrupt.h"
 #include "threads/intr-stubs.h"
 #include "threads/palloc.h"
+#include "threads/malloc.h"
 #include "threads/switch.h"
 #include "threads/synch.h"
 #include "threads/vaddr.h"
@@ -543,6 +544,9 @@ is_thread (struct thread *t)
   return t != NULL && t->magic == THREAD_MAGIC;
 }
 
+
+
+
 /* Does basic initialization of T as a blocked thread named
    NAME. */
 static void
@@ -560,6 +564,7 @@ init_thread (struct thread *t, const char *name, int priority)
   memset (t, 0, sizeof *t);
   t->status = THREAD_BLOCKED;
   strlcpy (t->name, name, sizeof t->name);
+  list_init(&t->fds);
   t->stack = (uint8_t *) t + PGSIZE;
   t->magic = THREAD_MAGIC;
   list_init(&t->holdings);
