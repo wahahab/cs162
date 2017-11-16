@@ -19,10 +19,22 @@
 #include "threads/thread.h"
 #include "threads/vaddr.h"
 
-static struct semaphore temporary;
+struct exec_file {
+    char *fname;
+    int open_cnt;
+    struct list_elem elem;
+};
+
+static struct list exec_files;
 static thread_func start_process NO_RETURN;
 static void get_fname(const char *cmdline, char *fname);
 static bool load (const char *cmdline, void (**eip) (void), void **esp);
+
+void
+process_init()
+{
+    list_init(&exec_files);
+}
 
 /* Starts a new thread running a user program loaded from
    FILENAME.  The new thread may be scheduled (and may even exit)
@@ -38,7 +50,6 @@ process_execute (const char *file_name)
 
   get_fname(file_name, fname);
 
-  sema_init (&temporary, 0);
   /* Make a copy of FILE_NAME.
      Otherwise there's a race between the caller and load(). */
   fn_copy = palloc_get_page (0);
@@ -77,12 +88,11 @@ start_process (void *si_)
   success = load (file_name, &if_.eip, &if_.esp);
 
   /* If load failed, quit. */
-  palloc_free_page (file_name);
-  if (!success)
-    thread_exit ();
-    
+  palloc_free_page (file_name);  
   si->success = success;
   sema_up(&si->sema);
+  if (!success)
+    thread_exit ();
 
   /* Start the user process by simulating a return from an
      interrupt, implemented by intr_exit (in
@@ -104,10 +114,69 @@ start_process (void *si_)
    This function will be implemented in problem 2-2.  For now, it
    does nothing. */
 int
-process_wait (tid_t child_tid UNUSED)
+process_wait (tid_t child_tid)
 {
-  sema_down (&temporary);
-  return 0;
+    struct thread *cur = thread_current();
+    struct thread_wait_context *child = NULL;
+    struct list_elem *e;
+    int status;
+
+    for(e = list_begin(&cur->children);
+            e != list_end(&cur->children);
+            e = list_next(e)) {
+        child = list_entry(e, struct thread_wait_context, children_elem);
+        if (child->tid == child_tid)
+            break;
+    }
+    if (child == NULL)
+        return -1;
+    sema_down(&child->finish_sema);
+    list_remove(&child->children_elem);
+    status = child->exit_status;
+    free(child);
+    return status;
+}
+
+void
+update_open_cnt(char *fname)
+{
+    struct list_elem *e = NULL;
+    struct exec_file *ef = NULL;
+
+    for (e = list_begin(&exec_files);
+            e != list_end(&exec_files);
+            e = list_next(e)) {
+        ef = list_entry(e, struct exec_file, elem);
+        if (strcmp(fname, ef->fname) == 0) {
+            ef->open_cnt++;
+            return;
+        }
+    }
+    ef = malloc(sizeof(struct exec_file));
+    ef->open_cnt = 1;
+    ef->fname = malloc(sizeof(char) * 256);
+    strlcpy(ef->fname, fname, 256);
+    list_push_front(&exec_files, &ef->elem);
+}
+void
+decrease_open_cnt(char *fname)
+{
+    struct list_elem *e = NULL;
+    struct exec_file *ef = NULL;
+
+    for (e = list_begin(&exec_files);
+            e != list_end(&exec_files);
+            e = list_next(e)) {
+        ef = list_entry(e, struct exec_file, elem);
+        if (strcmp(fname, ef->fname) == 0) {
+            ef->open_cnt--;
+            if (ef->open_cnt== 0) {
+                list_remove(&ef->elem);
+                free(ef);
+            }
+            return;
+        }
+    }
 }
 
 /* Free the current process's resources. */
@@ -116,6 +185,20 @@ process_exit (void)
 {
   struct thread *cur = thread_current ();
   uint32_t *pd;
+
+  // close all open fd
+  struct list_elem *e;
+  struct file_fd *ffd;
+
+  for (e = list_begin(&cur->fds);
+          e != list_end(&cur->fds);
+          e = list_next(e)) {
+      ffd = list_entry(e, struct file_fd, elem);
+      file_close(ffd->f);
+      list_remove(&ffd->elem);
+      free(ffd->fname);
+      //free(ffd);
+  }
 
   /* Destroy the current process's page directory and switch back
      to the kernel-only page directory. */
@@ -132,8 +215,10 @@ process_exit (void)
       cur->pagedir = NULL;
       pagedir_activate (NULL);
       pagedir_destroy (pd);
+
+      decrease_open_cnt(cur->name);
     }
-  sema_up (&temporary);
+  
 }
 
 /* Sets up the CPU for running user code in the current
@@ -404,10 +489,11 @@ load (const char *file_name, void (**eip) (void), void **esp)
   *eip = (void (*) (void)) ehdr.e_entry;
 
   success = true;
+  update_open_cnt(fname);
 
  done:
   /* We arrive here whether the load is successful or not. */
-  file_close (file);
+  // file_close (file);
   return success;
 }
 
@@ -576,12 +662,13 @@ get_filefd_from_fd(int fd)
     struct list_elem *e;
     struct file_fd *ffd;
 
-    for (e = list_head(&t->fds);
+    for (e = list_begin(&t->fds);
             e != list_end(&t->fds);
             e = list_next(e)) {
         ffd = list_entry(e, struct file_fd, elem);
-        if (ffd->fd == fd)
+        if (ffd->fd == fd) {
             return ffd;
+        }
     }
     return NULL;
 }
@@ -598,8 +685,9 @@ process_getfd(struct thread *t)
             e = list_next(e))
     {
         ffd = list_entry(e, struct file_fd, elem);
-        if(ffd->fd != fd)
+        if(ffd->fd != fd) {
             return fd;
+        }
         fd++;
     }
     return fd;
@@ -623,12 +711,17 @@ process_open_file(char *fname) {
 
     file = filesys_open(fname);
     if (file == NULL) {
+        file_close(file);
         return -1;
     }
+    if (list_size(&t->fds) >= 10)
+        return -1;
     ffd = malloc(sizeof(struct file_fd));
     ffd->f = file;
+    ffd->fname = malloc(sizeof(char) * 256);
     ffd->fd = process_getfd(t);
     ffd->offset = 0;
+    strlcpy(ffd->fname, fname, 256);
     list_insert_ordered(&t->fds, &ffd->elem,
             fd_cmp_func, NULL);
     return ffd->fd;
@@ -643,9 +736,81 @@ process_read_file(uint32_t *args)
     struct file_fd *ffd = get_filefd_from_fd(fd);
     int bytes_read = 0;
     
+    if (fd == 0) {
+        *buff = input_getc();
+        return 1;
+    }
     if (ffd == NULL)
         return -1;
     bytes_read = file_read_at(ffd->f, buff, size, ffd->offset);
     ffd->offset += bytes_read;
     return bytes_read;
+}
+void
+process_seek_file(uint32_t *args)
+{
+    int fd = *(args + 1);
+    unsigned pos = *(args + 2);
+    struct file_fd *ffd = get_filefd_from_fd(fd);
+
+    if (ffd == NULL)
+        return;
+    ffd->offset = pos;
+}
+void
+process_close_file(int fd)
+{
+    struct file_fd *ffd = get_filefd_from_fd(fd);
+
+    if (fd < 2)
+        return;
+    if (ffd == NULL)
+        return;
+    file_close(ffd->f);
+    list_remove(&ffd->elem);
+    free(ffd);
+}
+unsigned
+process_tell_file(int fd)
+{
+    struct file_fd *ffd = get_filefd_from_fd(fd);
+
+    if (ffd == NULL)
+        return 0;
+    return ffd->offset;
+}
+
+int
+ffd_can_write(struct file_fd *ffd)
+{
+    struct list_elem *e = NULL;
+    struct exec_file *ef = NULL;
+
+    for (e = list_begin(&exec_files);
+            e != list_end(&exec_files);
+            e = list_next(e)) {
+        ef = list_entry(e, struct exec_file, elem);
+        if (strcmp(ffd->fname, ef->fname) == 0) {
+            return 0;
+        }
+    }
+    return 1; 
+}
+
+int
+process_write_file(uint32_t *args)
+{
+    int fd = *(args + 1);
+    char *buff = *(args + 2);
+    unsigned size = *(args + 3);
+    struct file_fd *ffd = get_filefd_from_fd(fd);
+    int bytes_write = 0;
+
+    if (ffd == NULL)
+        return -1;
+    if (!ffd_can_write(ffd))
+        return 0;
+    bytes_write = file_write_at(ffd->f, buff, size, ffd->offset);
+    ffd->offset += bytes_write;
+    return bytes_write;
 }

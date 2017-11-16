@@ -103,6 +103,7 @@ thread_init (void)
   list_init (&ready_list);
   list_init (&all_list);
   list_init (&sleep_list);
+  sema_init (&fileop_sema, 1);
   load_avg = fix_int(0);
 
   if (thread_mlfqs) {
@@ -189,6 +190,8 @@ thread_create (const char *name, int priority,
   struct switch_entry_frame *ef;
   struct switch_threads_frame *sf;
   tid_t tid;
+  struct thread* cur = thread_current();
+  struct thread_wait_context *wctx;
 
   ASSERT (function != NULL);
 
@@ -200,6 +203,15 @@ thread_create (const char *name, int priority,
   /* Initialize thread. */
   init_thread (t, name, priority);
   tid = t->tid = allocate_tid ();
+
+  if (cur != NULL) {
+    wctx = malloc(sizeof(struct thread_wait_context));
+    wctx->tid = tid;
+    sema_init(&wctx->finish_sema, 0);
+    wctx->exit_status = 0;
+    list_push_front(&cur->children, &wctx->children_elem);
+    t->wait_ctx = wctx;
+  }
 
   /* Stack frame for kernel_thread(). */
   kf = alloc_frame (t, sizeof *kf);
@@ -565,11 +577,13 @@ init_thread (struct thread *t, const char *name, int priority)
   t->status = THREAD_BLOCKED;
   strlcpy (t->name, name, sizeof t->name);
   list_init(&t->fds);
+  lock_init(&t->fds_lock);
   t->stack = (uint8_t *) t + PGSIZE;
   t->magic = THREAD_MAGIC;
   list_init(&t->holdings);
   t->waiting = NULL;
   t->waiting_sema = NULL;
+  list_init(&t->children);
   if (cur == NULL) {
     t->recent_cpu = fix_int(0);
     t->nice = 0;

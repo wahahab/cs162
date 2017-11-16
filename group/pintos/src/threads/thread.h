@@ -99,6 +99,7 @@ struct thread
 #ifdef USERPROG
     /* Owned by userprog/process.c. */
     uint32_t *pagedir;                  /* Page directory. */
+    struct file *executable;
 #endif
 
     /* Owned by thread.c. */
@@ -111,10 +112,22 @@ struct thread
     struct list_elem mlfqs_elem;
     struct thread* parent;
     struct list fds;
+    struct lock fds_lock;
+    struct list children;
+    struct thread_wait_context *wait_ctx;
   };
+
+struct thread_wait_context {
+    // implement process exec and wait
+    tid_t tid;
+    struct list_elem children_elem;
+    struct semaphore finish_sema;
+    int exit_status;
+};
 
 struct file_fd {
     int fd;
+    char *fname;
     struct file* f;
     off_t offset;
     struct list_elem elem;

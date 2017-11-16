@@ -23,7 +23,12 @@ bool isvalid_address(void *p) {
 }
 
 void pexit(int status) {
-        printf("%s: exit(%d)\n", (char*) &thread_current ()->name, status);
+    struct thread *cur = thread_current();
+
+        printf("%s: exit(%d)\n",
+                (char*) cur->name, status);
+        cur->wait_ctx->exit_status = status;
+        sema_up(&cur->wait_ctx->finish_sema);
         thread_exit();
 }
 
@@ -37,6 +42,7 @@ syscall_handler (struct intr_frame *f UNUSED)
   struct file *opened_file;
   struct file_fd *opened_file_fd;
   struct thread *cur = thread_current();
+  tid_t tid;
 
   if (!isvalid_address(args)) {
     callno = SYS_EXIT;
@@ -49,10 +55,6 @@ syscall_handler (struct intr_frame *f UNUSED)
         return_status = ((return_status == 0)? args[1]: -1);
         f->eax = return_status;
         pexit(return_status);
-        break;
-    case SYS_WRITE:
-        if (args[1] == 1)
-            putbuf((char*)args[2], args[3]);
         break;
     case SYS_HALT:
         break;
@@ -70,6 +72,12 @@ syscall_handler (struct intr_frame *f UNUSED)
             f->eax = success;
         }
         break;
+    case SYS_REMOVE:
+        f->eax = filesys_remove(args[1]);
+        break;
+    case SYS_CLOSE:
+        process_close_file(args[1]);
+        break;
     case SYS_OPEN:
         if (args[1] == NULL) {
             f->eax = -1;
@@ -77,13 +85,45 @@ syscall_handler (struct intr_frame *f UNUSED)
         }
         f->eax = process_open_file(args[1]);
         break;
+    case SYS_TELL:
+        f->eax = process_tell_file(args[1]);
+        break;
+    case SYS_SEEK:
+        process_seek_file(args);       
+        break;
     case SYS_READ:
+        if (!isvalid_address(args[2])) {
+            f->eax = -1;
+            pexit(-1);
+        }
         f->eax = process_read_file(args);
+        break;
+    case SYS_WRITE:
+        if (!isvalid_address(args[2])) {
+            f->eax = -1;
+            pexit(-1);
+        }
+        if (args[1] == 1)
+            putbuf((char*)args[2], args[3]);
+        else
+            f->eax = process_write_file(args);
         break;
     case SYS_FILESIZE:
         f->eax = process_file_size(args[1]);
         break;
     case SYS_EXEC:
-        f->eax = process_execute(args[1]);
+        tid = process_execute(args[1]);
+        if (tid == TID_ERROR)
+            f->eax = -1;
+        else
+            f->eax = tid;
+        break;
+    case SYS_WAIT:
+        if (!isvalid_address(args[1])) {
+            f->eax = -1;
+            pexit(-1);
+        }
+        f->eax = process_wait(args[1]);
+        break;
   }
 }
