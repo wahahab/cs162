@@ -13,15 +13,17 @@
 #define INODE_MAGIC 0x494e4f44
 
 void inode_read_ahead(void *aux);
+bool inode_extend(struct inode *inode, off_t size);
+void inode_free(struct inode *inode);
 
 /* On-disk inode.
    Must be exactly BLOCK_SECTOR_SIZE bytes long. */
 struct inode_disk
   {
-    block_sector_t start;               /* First data sector. */
+    block_sector_t blocks[13];
     off_t length;                       /* File size in bytes. */
     unsigned magic;                     /* Magic number. */
-    uint32_t unused[125];               /* Not used. */
+    uint32_t unused[113];               /* Not used. */
   };
 
 /* Returns the number of sectors to allocate for an inode SIZE
@@ -50,11 +52,54 @@ struct inode
 static block_sector_t
 byte_to_sector (const struct inode *inode, off_t pos)
 {
+  block_sector_t *buffer;
+  block_sector_t *buffer2;
+  block_sector_t retval = -1;
+  off_t level1_ofs;
+  off_t level2_ofs;
+  off_t i = pos / BLOCK_SECTOR_SIZE;
+
   ASSERT (inode != NULL);
-  if (pos < inode->data.length)
-    return inode->data.start + pos / BLOCK_SECTOR_SIZE;
-  else
-    return -1;
+  // init buffers
+  buffer = malloc(sizeof(block_sector_t) * BLOCK_SECTOR_SIZE);
+  buffer2 = malloc(sizeof(block_sector_t) * BLOCK_SECTOR_SIZE);
+  // Load level 1 buffer
+  if (i >= 12) {
+    block_sector_t level1_idx = inode->data.blocks[12];
+    struct cache_entry *ce = cache_get(level1_idx);
+    if (ce != NULL)
+        memcpy(buffer, ce->data, BLOCK_SECTOR_SIZE);
+    else {
+        block_read(fs_device, level1_idx, buffer);
+        cache_set(level1_idx, (uint8_t *) buffer);
+    }
+  }
+  if (pos >= inode->data.length)
+      retval = -1;
+  else if (i < 12) // size in direct block range
+  {
+    retval = inode->data.blocks[i];
+  }
+  // indirect block range
+  else if (i < 12 + 256)
+  {
+    retval = (block_sector_t) buffer[i - 12];
+  }
+  // double indirect block range
+  else if (i < 12 + 256 + 256 * 512)
+  {
+    level2_ofs = (i - 12 - 256) % 512;
+    level1_ofs = (i - 12 - 256) / 512 + 256;
+    block_read(fs_device, buffer[level1_ofs], buffer2);
+    retval = (block_sector_t) buffer2[level2_ofs];
+  }
+  free(buffer);
+  free(buffer2);
+  return retval;
+  //if (pos < inode->data.length)
+  //  return inode->data.start + pos / BLOCK_SECTOR_SIZE;
+  //else
+  //  return -1;
 }
 
 /* List of open inodes, so that opening a single inode twice
@@ -78,7 +123,7 @@ bool
 inode_create (block_sector_t sector, off_t length)
 {
   struct inode_disk *disk_inode = NULL;
-  bool success = false;
+  struct inode inode;
 
   ASSERT (length >= 0);
 
@@ -87,30 +132,31 @@ inode_create (block_sector_t sector, off_t length)
   ASSERT (sizeof *disk_inode == BLOCK_SECTOR_SIZE);
 
   disk_inode = calloc (1, sizeof *disk_inode);
-  if (disk_inode != NULL)
-    {
-      size_t sectors = bytes_to_sectors (length);
-      disk_inode->length = length;
-      disk_inode->magic = INODE_MAGIC;
-      if (free_map_allocate (sectors, &disk_inode->start))
-        {
-          block_write (fs_device, sector, disk_inode);
-          cache_set(sector, (uint8_t *) disk_inode);
-          if (sectors > 0)
-            {
-              static char zeros[BLOCK_SECTOR_SIZE];
-              size_t i;
+  if (disk_inode == NULL)
+      return false;
+  memset(disk_inode, 0, sizeof *disk_inode);
+  // create a pseudo-inode
+  inode.sector = sector;
+  inode.data = *disk_inode;
+  return inode_extend(&inode, length);
 
-              for (i = 0; i < sectors; i++) {
-                block_write (fs_device, disk_inode->start + i, zeros);
-                cache_set(disk_inode->start, (uint8_t *)zeros);
-              }
-            }
-          success = true;
-        }
-      free (disk_inode);
-    }
-  return success;
+      // if (free_map_allocate (sectors, &disk_inode->start))
+      //   {
+      //     block_write (fs_device, sector, disk_inode);
+      //     cache_set(sector, (uint8_t *) disk_inode);
+      //     if (sectors > 0)
+      //       {
+      //         static char zeros[BLOCK_SECTOR_SIZE];
+      //         size_t i;
+
+      //         for (i = 0; i < sectors; i++) {
+      //           block_write (fs_device, disk_inode->start + i, zeros);
+      //           cache_set(disk_inode->start, (uint8_t *)zeros);
+      //         }
+      //       }
+      //     success = true;
+      //   }
+      // free (disk_inode);
 }
 
 /* Reads an inode from SECTOR
@@ -172,6 +218,47 @@ inode_get_inumber (const struct inode *inode)
   return inode->sector;
 }
 
+void
+inode_free(struct inode *inode)
+{
+    struct inode_disk *disk_inode = &inode->data;
+    off_t num_sectors = bytes_to_sectors(disk_inode->length);
+    off_t i;
+    off_t level1_ofs = 0;
+    off_t level2_ofs;
+    block_sector_t *level1_buffer;
+    block_sector_t *level2_buffer;
+
+    level1_buffer = malloc(sizeof(block_sector_t) * BLOCK_SECTOR_SIZE);
+    level2_buffer = malloc(sizeof(block_sector_t) * BLOCK_SECTOR_SIZE);
+    memset(level1_buffer, 0, sizeof(block_sector_t) * BLOCK_SECTOR_SIZE);
+    memset(level1_buffer, 0, sizeof(block_sector_t) * BLOCK_SECTOR_SIZE);
+    if (num_sectors > 12) {
+        block_read(fs_device, disk_inode->blocks[12], level1_buffer);
+    }
+    for (i = 0 ; i < num_sectors ; i ++) {
+        if (i < 12) {
+            free_map_release(disk_inode->blocks[i], 1);
+        }
+        else if (i < 12 + 256) {
+            free_map_release(level1_buffer[i - 12], 1);
+        }
+        else if (i < 12 + 256 + 256 * 512) {
+            level2_ofs = (i - 12 - 256) % 512;
+            level1_ofs = (i - 12 - 256) / 512 + 256;
+            if (level2_ofs == 0)
+                block_read(fs_device, level1_buffer[level1_ofs], level2_buffer);
+            free_map_release(level2_buffer[level2_ofs], 1);
+            if (level2_ofs == 511)
+                free_map_release(level1_buffer[level1_ofs], 1);
+        }
+    }
+    if (num_sectors > 12 + 256)
+        free_map_release(level1_buffer[level1_ofs], 1);
+    free(level1_buffer);
+    free(level2_buffer);
+}
+
 /* Closes INODE and writes it to disk.
    If this was the last reference to INODE, frees its memory.
    If INODE was also a removed inode, frees its blocks. */
@@ -191,9 +278,10 @@ inode_close (struct inode *inode)
       /* Deallocate blocks if removed. */
       if (inode->removed)
         {
-          free_map_release (inode->sector, 1);
-          free_map_release (inode->data.start,
-                            bytes_to_sectors (inode->data.length));
+          inode_free(inode);
+          // free_map_release (inode->sector, 1);
+          // free_map_release (inode->data.start,
+          //                  bytes_to_sectors (inode->data.length));
         }
 
       free (inode);
@@ -288,6 +376,102 @@ inode_read_at (struct inode *inode, void *buffer_, off_t size, off_t offset)
   return bytes_read;
 }
 
+// extend inode's size to (size)
+bool inode_extend(struct inode *inode, off_t size) {
+    off_t current_sectors = bytes_to_sectors(inode_length(inode));
+    off_t to_sectors = bytes_to_sectors(size);
+    off_t i;
+    off_t level1_ofs = 0;
+    off_t level2_ofs;
+    block_sector_t *level1_buffer;
+    block_sector_t *level2_buffer;
+    static char *zeros;
+    block_sector_t level1_idx;
+    block_sector_t level2_idx;
+    block_sector_t sector_idx;
+    struct inode_disk *disk_inode = &inode->data;
+
+    level1_buffer = malloc(sizeof(block_sector_t) * BLOCK_SECTOR_SIZE);
+    level2_buffer = malloc(sizeof(block_sector_t) * BLOCK_SECTOR_SIZE);
+    zeros = malloc(sizeof(char) * BLOCK_SECTOR_SIZE);
+    // initial level2_buffer and level1_buffer
+    memset(zeros, 0, sizeof(char) * BLOCK_SECTOR_SIZE);
+    memset(level1_buffer, 0, sizeof(block_sector_t) * BLOCK_SECTOR_SIZE);
+    memset(level2_buffer, 0, sizeof(block_sector_t) * BLOCK_SECTOR_SIZE);
+    // load level 1 block first
+    if (current_sectors > 12)
+        block_read(fs_device, inode->data.blocks[12], level1_buffer);
+    // if level 1 block isn't allocate but we need it
+    // then create it
+    else if (to_sectors > 12) {
+        if (!free_map_allocate(1, &level1_idx)) {
+            free(level1_buffer);
+            free(level2_buffer);
+            free(zeros);
+            return false;
+        }
+        block_write(fs_device, level1_idx, zeros);
+        inode->data.blocks[12] = level1_idx;
+    }
+    // check if we need to load current max level2 block
+    if (current_sectors > (12 + 256)) {
+        off_t ofs = (current_sectors - 1 - 12 - 256) / 512 + 256;
+        block_read(fs_device, level1_buffer[ofs], level2_buffer);
+    }
+    // allocate blocks
+    for (i = current_sectors ; i < to_sectors ; i++) {
+        if (!free_map_allocate(1, &sector_idx)) {
+            free(level1_buffer);
+            free(level2_buffer);
+            free(zeros);
+            return false;
+        }
+        block_write(fs_device, sector_idx, zeros);
+        if (i < 12)
+            disk_inode->blocks[i] = sector_idx;
+        else if (i < 12 + 256)
+            level1_buffer[i - 12] = sector_idx;
+        else if (i < 12 + 256 + 256 * 512) {
+            level1_ofs = (i - 12 - 256) / 512 + 256;
+            level2_ofs = (i - 12 - 256) % 512;
+            if (level2_ofs == 0) {
+                if (!free_map_allocate(1, &level2_idx)) {
+                    free(level1_buffer);
+                    free(level2_buffer);
+                    free(zeros);
+                    return false;
+                }
+                level1_buffer[level1_ofs] = level2_idx;
+                memset(level2_buffer, 0,
+                        sizeof(block_sector_t) * BLOCK_SECTOR_SIZE);
+            }
+            level2_buffer[level2_ofs] = sector_idx;
+            if (level2_ofs == 511) {
+                block_write(fs_device, level1_buffer[level1_ofs], level2_buffer);
+            }
+        }
+        else {
+            free(level1_buffer);
+            free(level2_buffer);
+            free(zeros);
+            return false;
+        }
+    }
+    // save level 2 buffer to disk
+    if (to_sectors > 12 + 256)
+        block_write(fs_device, level1_buffer[level1_ofs], level2_buffer);
+    // save level 1 buffer to disk
+    if (to_sectors > 12)
+        block_write(fs_device, disk_inode->blocks[12], level1_buffer);
+    // extend success, save inode to disk
+    inode->data.length = size;
+    disk_inode->magic = INODE_MAGIC;
+    block_write(fs_device, inode->sector, disk_inode);
+    free(level1_buffer);
+    free(level2_buffer);
+    free(zeros);
+    return true;
+}
 
 /* Writes SIZE bytes from BUFFER into INODE, starting at OFFSET.
    Returns the number of bytes actually written, which may be
@@ -304,6 +488,12 @@ inode_write_at (struct inode *inode, const void *buffer_, off_t size,
 
   if (inode->deny_write_cnt)
     return 0;
+
+  // If there is no enough space in inode, allocate first
+  // if extend size fail, return 0
+  if (offset + size > inode_length(inode)
+          && !inode_extend(inode, offset + size))
+        return 0;
 
   while (size > 0)
     {
