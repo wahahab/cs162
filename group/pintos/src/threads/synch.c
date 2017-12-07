@@ -32,6 +32,13 @@
 #include "threads/interrupt.h"
 #include "threads/thread.h"
 
+static void reorder_waiters(struct thread*);
+static void donate_nest(struct thread*);
+static bool waiter_priority_cmp(const struct list_elem *a,
+        const struct list_elem *b, void *aux);
+
+
+
 /* Initializes semaphore SEMA to VALUE.  A semaphore is a
    nonnegative integer along with two atomic operators for
    manipulating it:
@@ -359,7 +366,7 @@ cond_init (struct condition *cond)
 
 bool
 waiter_priority_cmp(const struct list_elem *a,
-        const struct list_elem *b, void *aux)
+        const struct list_elem *b, void *aux UNUSED)
 {
     struct semaphore_elem *w1 = list_entry(a, struct semaphore_elem, elem);
     struct semaphore_elem *w2 = list_entry(b, struct semaphore_elem, elem);

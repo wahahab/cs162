@@ -3,8 +3,14 @@
 #include <string.h>
 #include <list.h>
 #include "filesys/filesys.h"
+#include "filesys/free-map.h"
 #include "filesys/inode.h"
+#include "filesys/file.h"
 #include "threads/malloc.h"
+#include "threads/thread.h"
+
+
+static bool dir_isempty(struct dir*);
 
 /* A directory. */
 struct dir
@@ -26,7 +32,8 @@ struct dir_entry
 bool
 dir_create (block_sector_t sector, size_t entry_cnt)
 {
-  return inode_create (sector, entry_cnt * sizeof (struct dir_entry));
+  return inode_create_real (sector,
+          entry_cnt * sizeof (struct dir_entry), true);
 }
 
 /* Opens and returns the directory for the given INODE, of which
@@ -178,6 +185,19 @@ dir_add (struct dir *dir, const char *name, block_sector_t inode_sector)
   return success;
 }
 
+bool
+dir_isempty(struct dir *dir)
+{
+  off_t ofs;
+  struct dir_entry e;
+
+  for (ofs = 0; inode_read_at (dir->inode, &e, sizeof e, ofs) == sizeof e;
+       ofs += sizeof e)
+    if (e.in_use)
+        return false;
+  return true;
+}
+
 /* Removes any entry for NAME in DIR.
    Returns true if successful, false on failure,
    which occurs only if there is no file with the given NAME. */
@@ -206,6 +226,9 @@ dir_remove (struct dir *dir, const char *name)
   if (inode_write_at (dir->inode, &e, sizeof e, ofs) != sizeof e)
     goto done;
 
+  if (inode->data.isdir && !dir_isempty(dir_open(inode)))
+      goto done;
+
   /* Remove inode. */
   inode_remove (inode);
   success = true;
@@ -233,4 +256,251 @@ dir_readdir (struct dir *dir, char name[NAME_MAX + 1])
         }
     }
   return false;
+}
+
+bool
+to_dir_path(char *path)
+{
+    size_t i;
+    char *prev = NULL;
+    char *cur = NULL;
+    char c;
+
+    // make sure path ends with /
+    if (*(path + strlen(path) - 1) != '/')
+        strlcat(path, "/", sizeof(char));
+    for (i = 0 ; i < strlen(path) ; i ++)
+    {
+        c = *(path + i);
+        if (c == '/') {
+            prev = cur;
+            cur = path + i;
+        }
+    }
+    if (prev == NULL)
+        return false;
+    *(prev + 1) = '\0';
+    return true;
+}
+
+// Simplify given path, return true if success, false if fail to simplify it
+// example: /foo/bar/.././barbar/.. => /foo
+bool
+simplify_path(char *path)
+{
+    char *buff, *fname;
+    bool success = false;
+    size_t i, k, path_len;
+    char c, cnext;
+
+    path_len = strlen(path);
+    // make sure path ends with (/)
+    if (*(path + path_len - 1) != '/') {
+        *(path + path_len + 1) = '\0';
+        *(path + path_len) = '/';
+    }
+    buff = malloc(sizeof(char) * PATH_MAX);
+    fname = malloc(sizeof(char) * NAME_MAX);
+    memset(buff, 0, sizeof(char) * PATH_MAX);
+    memset(fname, 0, sizeof(char) * NAME_MAX);
+    // check if path starts from root
+    if (*path != '/')
+        goto done;
+    // copy root path (/)
+    *buff = *path;
+    k = 0;
+    for (i = 1; i < strlen(path); i++) {
+        c = *(path + i);
+        cnext = *(path + (i + 1));
+        if (c == '.' && cnext == '.') {
+            if (!to_dir_path(buff))
+                goto done;
+        }
+        else if (c == '.' && cnext == '/') {
+            i++;
+        }
+        else if (c == '/') {
+            *(fname + k) = '\0';
+            if (strcmp(fname, "") != 0) {
+                strlcat(buff, fname,
+                        strlen(buff) + strlen(fname) + 1);
+                strlcat(buff, "/",
+                        strlen(buff) + strlen("/") + 1);
+            }
+            k = 0;
+            *(fname + k) = '\0';
+        }
+        else {
+            *(fname + k) = c;
+            k++;
+        }
+    }
+    memset(path, 0, strlen(path));
+    memcpy(path, buff, strlen(buff));
+    success = true;
+
+done:
+    free(buff);
+    free(fname);
+    return success;
+}
+
+// Check if given path of directory exist
+struct dir*
+get_dir_by_path(const char *path)
+{
+    struct inode *dir_inode;
+    struct dir *dir = dir_open_root();
+    struct dir *return_dir = NULL;
+    struct dir_entry next_dir_entry;
+    off_t next_dir_ofs;
+    char *fname;
+    size_t i, j;
+    char c;
+    
+    j = 0;
+    fname = malloc(sizeof(char) * NAME_MAX);
+    memset(fname, 0, sizeof(char) * NAME_MAX);
+    for (i = 1; i < strlen(path) ; i++)
+    {
+        c = *(path + i);
+        if (c == '/') {
+            *(fname + j) = '\0';
+            if (lookup(dir, fname, &next_dir_entry,
+                        &next_dir_ofs)) {
+                dir_inode = inode_open(next_dir_entry.inode_sector);
+                dir_close(dir);
+                dir = dir_open(dir_inode); 
+                j = 0;
+            }
+            else {
+                dir_close(dir);
+                goto done;
+            }
+        }
+        else {
+            *(fname + j) = c;
+            j++;
+        }
+    }
+    return_dir = dir;
+
+done:
+    free(fname);
+    return return_dir;
+}
+
+void
+to_abs(char *path)
+{
+    struct thread *cur = thread_current();
+    size_t cwd_len = strlen(cur->cwd);
+    char *buff = malloc(sizeof(char) * PATH_MAX);
+
+    memset(buff, 0, sizeof(char) * PATH_MAX);
+    memcpy(buff, path, strlen(path));
+    if (*path != '/') {
+        memcpy(path, cur->cwd, strlen(cur->cwd) + 1);
+        strlcat(path, buff, strlen(path) + strlen(buff) + 1);
+    }
+    free(buff);
+}
+
+bool
+dir_chdir (const char *path)
+{
+    char *buff;
+    struct thread *cur = thread_current();
+    bool success = false;
+    struct dir *dir = NULL;
+
+    buff = malloc(sizeof(char) * PATH_MAX);
+    memset(buff, 0, sizeof(char) * PATH_MAX);
+    memcpy(buff, path, strlen(path));
+    to_abs(buff);
+    if (simplify_path(buff)
+            && (dir = get_dir_by_path(buff)) != NULL) {
+        success = true;
+        memcpy(cur->cwd, buff, PATH_MAX);
+    }
+    dir_close(dir);
+    free(buff);
+    return success;
+}
+
+bool
+dir_mkdir(const char *path)
+{
+    char *buff;
+    char *parent_dir_path;
+    char *dirname;
+    struct dir *parent;
+    bool success = false;
+    block_sector_t dirsector;
+
+    buff = malloc(sizeof(char) * PATH_MAX);
+    parent_dir_path = malloc(sizeof(char) * PATH_MAX);
+    dirname = malloc(sizeof(char) * NAME_MAX);
+    memset(dirname, 0, sizeof(char) * NAME_MAX);
+    memset(buff, 0, sizeof(char) * PATH_MAX);
+    memset(parent_dir_path, 0, sizeof(char) * PATH_MAX);
+    memcpy(buff, path, strlen(path));
+    to_abs(buff);
+    if (!simplify_path(buff))
+        goto done;
+    memcpy(parent_dir_path, buff, strlen(buff));
+    if (!to_dir_path(parent_dir_path))
+        goto done;
+    if ((parent = get_dir_by_path(parent_dir_path)) == NULL)
+        goto done;
+    memcpy(dirname, buff + strlen(parent_dir_path),
+            strlen(buff) - strlen(parent_dir_path) - 1);
+    if (lookup(parent, dirname, NULL, NULL))
+        goto done;
+    if (!free_map_allocate(1, &dirsector) ||
+            !dir_create(dirsector, 16))
+        goto done;
+    dir_add(parent, dirname, dirsector);
+    success = true;
+
+done:
+    free(buff);
+    free(parent_dir_path);
+    dir_close(parent);
+    free(dirname);
+    return success;
+}
+
+bool
+readdir(int fd, char *name)
+{
+    struct file_fd *ffd = NULL;
+
+    get_filefd_from_fd(fd, &ffd);
+    if (ffd == NULL)
+        return false;
+    // struct dir *dir = dir_open(ffd->f->inode);
+    // if (dir == NULL)
+    //     return false;
+
+    return dir_readdir(ffd->dir, name);  
+}
+
+bool
+dir_isdir(int fd)
+{
+    struct file_fd *ffd = NULL;
+    
+    get_filefd_from_fd(fd, &ffd);
+    return ffd != NULL && ffd->f->inode->data.isdir;
+}
+
+int inumber (fd)
+{
+    struct file_fd *ffd = NULL;
+
+    get_filefd_from_fd(fd, &ffd);
+    if (ffd == NULL)
+        return -1;
+    return ffd->f->inode->sector;
 }

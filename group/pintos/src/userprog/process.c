@@ -9,7 +9,9 @@
 #include "userprog/pagedir.h"
 #include "userprog/tss.h"
 #include "filesys/directory.h"
+#include "filesys/path.h"
 #include "filesys/file.h"
+#include "filesys/path.h"
 #include "filesys/filesys.h"
 #include "threads/flags.h"
 #include "threads/init.h"
@@ -29,6 +31,12 @@ static struct list exec_files;
 static thread_func start_process NO_RETURN;
 static void get_fname(const char *cmdline, char *fname);
 static bool load (const char *cmdline, void (**eip) (void), void **esp);
+static void get_ppath(const char *cmd, char *ppath);
+static void update_open_cnt(char *fname);
+static void decrease_open_cnt(char *fname);
+
+
+
 
 void
 process_init()
@@ -36,27 +44,44 @@ process_init()
     list_init(&exec_files);
 }
 
+void get_ppath(const char *cmd, char *ppath)
+{
+    int i;
+    int j;
+
+    for (i = 0, j = 0 ; *(cmd + i) != ' ' && *(cmd + i) != '\0';
+            i++)
+    {
+        *(ppath + j++) = *(cmd + i);
+    }
+    *(ppath + j) = '\0';
+}
+
 /* Starts a new thread running a user program loaded from
    FILENAME.  The new thread may be scheduled (and may even exit)
    before process_execute() returns.  Returns the new process's
    thread id, or TID_ERROR if the thread cannot be created. */
 tid_t
-process_execute (const char *file_name)
+process_execute (const char *cmd)
 {
   char *fn_copy;
   tid_t tid;
-  char fname[1024];
+  char fname[NAME_MAX + 1];
+  char *ppath = malloc(sizeof(char) * PATH_MAX);
   struct start_info si;
 
-  get_fname(file_name, fname);
+  get_ppath(cmd, ppath);
+  path_basename(ppath, fname);
 
   /* Make a copy of FILE_NAME.
      Otherwise there's a race between the caller and load(). */
   fn_copy = palloc_get_page (0);
-  if (fn_copy == NULL)
-    return TID_ERROR;
-  strlcpy (fn_copy, file_name, PGSIZE);
-
+  if (fn_copy == NULL) {
+    tid = TID_ERROR;
+    goto done;
+  }
+  strlcpy (fn_copy, cmd, PGSIZE);
+  
   /* Create a new thread to execute FILE_NAME. */
   si.cmd = fn_copy;
   sema_init(&si.sema, 0);
@@ -66,6 +91,9 @@ process_execute (const char *file_name)
   sema_down(&si.sema);
   if (!si.success)
       tid = TID_ERROR;
+
+done:
+  free(ppath);
   return tid;
 }
 
@@ -75,20 +103,19 @@ static void
 start_process (void *si_)
 {
   struct start_info *si = si_;
-  char *file_name = si->cmd;
+  char *cmd = si->cmd;
   struct intr_frame if_;
   bool success;
 
-  // printf("file_name: %s\n", file_name);
   /* Initialize interrupt frame and load executable. */
   memset (&if_, 0, sizeof if_);
   if_.gs = if_.fs = if_.es = if_.ds = if_.ss = SEL_UDSEG;
   if_.cs = SEL_UCSEG;
   if_.eflags = FLAG_IF | FLAG_MBS;
-  success = load (file_name, &if_.eip, &if_.esp);
+  success = load (cmd, &if_.eip, &if_.esp);
 
   /* If load failed, quit. */
-  palloc_free_page (file_name);  
+  palloc_free_page (cmd);  
   si->success = success;
   sema_up(&si->sema);
   if (!success)
@@ -128,12 +155,15 @@ process_wait (tid_t child_tid)
         if (child->tid == child_tid)
             break;
     }
-    if (child == NULL)
+    if (child == NULL || child->tid != child_tid)
+        return -2;
+    if (child != NULL && child->waited == 1)
         return -1;
+    child->waited = 1;
     sema_down(&child->finish_sema);
-    list_remove(&child->children_elem);
+    // list_remove(&child->children_elem);
     status = child->exit_status;
-    free(child);
+    // free(child);
     return status;
 }
 
@@ -154,8 +184,8 @@ update_open_cnt(char *fname)
     }
     ef = malloc(sizeof(struct exec_file));
     ef->open_cnt = 1;
-    ef->fname = malloc(sizeof(char) * 256);
-    strlcpy(ef->fname, fname, 256);
+    ef->fname = malloc(sizeof(char) * PATH_MAX);
+    strlcpy(ef->fname, fname, PATH_MAX);
     list_push_front(&exec_files, &ef->elem);
 }
 void
@@ -189,6 +219,7 @@ process_exit (void)
   // close all open fd
   struct list_elem *e;
   struct file_fd *ffd;
+  struct thread_wait_context *wctx;
 
   for (e = list_begin(&cur->fds);
           e != list_end(&cur->fds);
@@ -198,6 +229,14 @@ process_exit (void)
       list_remove(&ffd->elem);
       free(ffd->fname);
       //free(ffd);
+  }
+  // free children
+  for (e = list_begin(&cur->children);
+          e != list_end(&cur->children);
+          e = list_next(e))
+  {
+    wctx = list_entry(e, struct thread_wait_context, children_elem);
+    // free(wctx);
   }
 
   /* Destroy the current process's page directory and switch back
@@ -336,7 +375,7 @@ get_fname(const char *file_name, char *fname)
    and its initial stack pointer into *ESP.
    Returns true if successful, false otherwise. */
 bool
-load (const char *file_name, void (**eip) (void), void **esp)
+load (const char *cmd, void (**eip) (void), void **esp)
 {
   struct thread *t = thread_current ();
   struct Elf32_Ehdr ehdr;
@@ -344,9 +383,11 @@ load (const char *file_name, void (**eip) (void), void **esp)
   off_t file_ofs;
   bool success = false;
   int i;
-  char fname[1024];
+  char fname[NAME_MAX];
+  char *ppath = malloc(sizeof(char) * PATH_MAX);
 
-  get_fname(file_name, fname);
+  get_ppath(cmd, ppath);
+  path_basename(ppath, fname);
     
   /* Allocate and activate page directory. */
   t->pagedir = pagedir_create ();
@@ -355,7 +396,7 @@ load (const char *file_name, void (**eip) (void), void **esp)
   process_activate ();
 
   /* Open executable file. */
-  file = filesys_open (fname);
+  file = filesys_open (ppath);
   if (file == NULL)
     {
       printf ("load: %s: open failed\n", fname);
@@ -371,7 +412,7 @@ load (const char *file_name, void (**eip) (void), void **esp)
       || ehdr.e_phentsize != sizeof (struct Elf32_Phdr)
       || ehdr.e_phnum > 1024)
     {
-      printf ("load: %s: error loading executable\n", file_name);
+      printf ("load: %s: error loading executable\n", ppath);
       goto done;
     }
 
@@ -447,11 +488,11 @@ load (const char *file_name, void (**eip) (void), void **esp)
 
   i = 0;
   inword = 0;
-  while(*(file_name + i) != '\0')
+  while(*(cmd + i) != '\0')
       i++;
   i--;
   while(i >= 0) {
-    if (*(file_name + i) == ' ') {
+    if (*(cmd + i) == ' ') {
         if (inword) {
             args[argc] = (char*)sp;
             argc++;
@@ -462,7 +503,7 @@ load (const char *file_name, void (**eip) (void), void **esp)
         if (!inword)
             *(char*)(--sp) = '\0';
         inword = 1;
-        *(char*)(--sp) = *(file_name + i);
+        *(char*)(--sp) = *(cmd + i);
     }
     i--;
   }
@@ -489,9 +530,10 @@ load (const char *file_name, void (**eip) (void), void **esp)
   *eip = (void (*) (void)) ehdr.e_entry;
 
   success = true;
-  update_open_cnt(fname);
+  update_open_cnt(ppath);
 
  done:
+  free(ppath);
   /* We arrive here whether the load is successful or not. */
   // file_close (file);
   return success;
@@ -655,8 +697,8 @@ bool fd_cmp_func (const struct list_elem *a,
     return ffda->fd < ffdb->fd;
 }
 
-struct file_fd*
-get_filefd_from_fd(int fd)
+void
+get_filefd_from_fd(int fd, struct file_fd **ffdp)
 {
     struct thread *t = thread_current();
     struct list_elem *e;
@@ -667,10 +709,10 @@ get_filefd_from_fd(int fd)
             e = list_next(e)) {
         ffd = list_entry(e, struct file_fd, elem);
         if (ffd->fd == fd) {
-            return ffd;
+            *ffdp = ffd;
         }
     }
-    return NULL;
+    return;
 }
 
 int
@@ -696,35 +738,49 @@ process_getfd(struct thread *t)
 int
 process_file_size(int fd)
 {
-    struct file_fd *ffd = get_filefd_from_fd(fd);
+    struct file_fd *ffd = NULL;
 
+    get_filefd_from_fd(fd, &ffd);
     if (ffd == NULL)
         return -1;
     return file_length(ffd->f);
 }
 
 int
-process_open_file(char *fname) {
+process_open_file(char *path) {
     struct file *file;
     struct file_fd *ffd;
     struct thread *t = thread_current();
+    char fname[NAME_MAX];
+    char *buff = malloc(sizeof(char) * PATH_MAX);
+    int to_return = -1;
 
-    file = filesys_open(fname);
-    if (file == NULL) {
-        file_close(file);
-        return -1;
-    }
-    if (list_size(&t->fds) >= 10)
-        return -1;
+    memset(buff, 0, sizeof(char) * PATH_MAX);
+    memcpy(buff, path, strlen(path));
+    to_abs(buff);
+    if (!simplify_path(buff))
+        goto done;
+    path_basename(buff, fname);
+    file = filesys_open(path);
+    if (file == NULL || list_size(&t->fds) > 10)
+        goto done;
     ffd = malloc(sizeof(struct file_fd));
+    if (file->inode->data.isdir)
+        ffd->dir = dir_open(file->inode);
+    else
+        ffd->dir = NULL;
     ffd->f = file;
-    ffd->fname = malloc(sizeof(char) * 256);
+    ffd->fname = malloc(sizeof(char) * NAME_MAX);
     ffd->fd = process_getfd(t);
     ffd->offset = 0;
-    strlcpy(ffd->fname, fname, 256);
+    strlcpy(ffd->fname, fname, NAME_MAX);
     list_insert_ordered(&t->fds, &ffd->elem,
             fd_cmp_func, NULL);
-    return ffd->fd;
+    to_return = ffd->fd;
+
+done:
+    free(buff);
+    return to_return;
 }
 
 int
@@ -733,9 +789,10 @@ process_read_file(uint32_t *args)
     int fd = *(args + 1);
     char *buff = *(args + 2);
     unsigned size = *(args + 3);
-    struct file_fd *ffd = get_filefd_from_fd(fd);
+    struct file_fd *ffd = NULL;
     int bytes_read = 0;
-    
+   
+    get_filefd_from_fd(fd, &ffd);
     if (fd == 0) {
         *buff = input_getc();
         return 1;
@@ -751,8 +808,9 @@ process_seek_file(uint32_t *args)
 {
     int fd = *(args + 1);
     unsigned pos = *(args + 2);
-    struct file_fd *ffd = get_filefd_from_fd(fd);
+    struct file_fd *ffd = NULL;
 
+    get_filefd_from_fd(fd, &ffd);
     if (ffd == NULL)
         return;
     ffd->offset = pos;
@@ -760,21 +818,23 @@ process_seek_file(uint32_t *args)
 void
 process_close_file(int fd)
 {
-    struct file_fd *ffd = get_filefd_from_fd(fd);
+    struct file_fd *ffd = NULL;
 
-    if (fd < 2)
-        return;
-    if (ffd == NULL)
+    get_filefd_from_fd(fd, &ffd);
+    if (fd < 2 || ffd == NULL)
         return;
     file_close(ffd->f);
+    dir_close(ffd->dir);
+    free(ffd->fname);
     list_remove(&ffd->elem);
     free(ffd);
 }
 unsigned
 process_tell_file(int fd)
 {
-    struct file_fd *ffd = get_filefd_from_fd(fd);
+    struct file_fd *ffd = NULL;
 
+    get_filefd_from_fd(fd, &ffd);
     if (ffd == NULL)
         return 0;
     return ffd->offset;
@@ -803,13 +863,17 @@ process_write_file(uint32_t *args)
     int fd = *(args + 1);
     char *buff = *(args + 2);
     unsigned size = *(args + 3);
-    struct file_fd *ffd = get_filefd_from_fd(fd);
+    struct file_fd *ffd = NULL;
     int bytes_write = 0;
 
+    get_filefd_from_fd(fd, &ffd);
     if (ffd == NULL)
         return -1;
     if (!ffd_can_write(ffd))
         return 0;
+    // check if it's directory
+    if (ffd->f->inode->data.isdir)
+        return -1;
     bytes_write = file_write_at(ffd->f, buff, size, ffd->offset);
     ffd->offset += bytes_write;
     return bytes_write;

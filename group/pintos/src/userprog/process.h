@@ -3,7 +3,6 @@
 
 #include "threads/thread.h"
 
-static struct semaphore fileop_sema;
 struct start_info {
     char *cmd;
     bool success;
@@ -16,5 +15,6 @@ void process_exit (void);
 void process_init (void);
 void process_activate (void);
 void pexit (int status);
+void get_filefd_from_fd(int fd, struct file_fd **ffdp);
 
 #endif /* userprog/process.h */

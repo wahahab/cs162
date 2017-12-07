@@ -13,6 +13,7 @@
 #include "threads/synch.h"
 #include "threads/vaddr.h"
 #include "devices/timer.h"
+#include "filesys/directory.h"
 #ifdef USERPROG
 #include "userprog/process.h"
 #endif
@@ -103,7 +104,7 @@ thread_init (void)
   list_init (&ready_list);
   list_init (&all_list);
   list_init (&sleep_list);
-  sema_init (&fileop_sema, 1);
+  // sema_init (&fileop_sema, 1);
   load_avg = fix_int(0);
 
   if (thread_mlfqs) {
@@ -209,6 +210,7 @@ thread_create (const char *name, int priority,
     wctx->tid = tid;
     sema_init(&wctx->finish_sema, 0);
     wctx->exit_status = 0;
+    wctx->waited = 0;
     list_push_front(&cur->children, &wctx->children_elem);
     t->wait_ctx = wctx;
   }
@@ -584,11 +586,16 @@ init_thread (struct thread *t, const char *name, int priority)
   t->waiting = NULL;
   t->waiting_sema = NULL;
   list_init(&t->children);
+  memset(t->cwd, 0, sizeof(char) * PATH_MAX);
+  // current thread is main thread
   if (cur == NULL) {
+    *(t->cwd) = '/';
     t->recent_cpu = fix_int(0);
     t->nice = 0;
   }
+  // properties inherit from parent process
   else {
+    memcpy(t->cwd, cur->cwd, strlen(cur->cwd));
     t->recent_cpu = cur->recent_cpu;
     t->nice = cur->nice;
   }

@@ -2,10 +2,36 @@
 #define FILESYS_INODE_H
 
 #include <stdbool.h>
+#include <list.h>
 #include "filesys/off_t.h"
 #include "devices/block.h"
 
 struct bitmap;
+/* In-memory inode. */
+
+/* On-disk inode.
+   Must be exactly BLOCK_SECTOR_SIZE bytes long. */
+struct inode_disk
+  {
+    block_sector_t blocks[13];
+    off_t length;                       /* File size in bytes. */
+    unsigned magic;                     /* Magic number. */
+    bool isdir;
+    uint32_t unused[112];               /* Not used. */
+  };
+
+
+
+struct inode
+  {
+    struct list_elem elem;              /* Element in inode list. */
+    block_sector_t sector;              /* Sector number of disk location. */
+    int open_cnt;                       /* Number of openers. */
+    bool removed;                       /* True if deleted, false otherwise. */
+    int deny_write_cnt;                 /* 0: writes ok, >0: deny writes. */
+    struct inode_disk data;             /* Inode content. */
+  };
+
 
 void inode_init (void);
 bool inode_create (block_sector_t, off_t);

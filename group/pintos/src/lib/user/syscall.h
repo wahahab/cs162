@@ -45,5 +45,7 @@ bool mkdir (const char *dir);
 bool readdir (int fd, char name[READDIR_MAX_LEN + 1]);
 bool isdir (int fd);
 int inumber (int fd);
+// project 4 test
+bool simplify_path (char *path);
 
 #endif /* lib/user/syscall.h */

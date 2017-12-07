@@ -188,3 +188,9 @@ inumber (int fd)
 {
   return syscall1 (SYS_INUMBER, fd);
 }
+
+bool
+simplify_path (char *path)
+{
+  return syscall1(SYS_TEST_SIMPATH, path);
+}

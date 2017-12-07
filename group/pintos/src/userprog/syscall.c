@@ -6,6 +6,7 @@
 #include "threads/thread.h"
 #include "filesys/file.h"
 #include "filesys/filesys.h"
+#include "filesys/directory.h"
 #include "threads/vaddr.h"
 
 static void syscall_handler (struct intr_frame *);
@@ -39,9 +40,7 @@ syscall_handler (struct intr_frame *f UNUSED)
   int return_status = 0;
   int callno;
   bool success;
-  struct file *opened_file;
-  struct file_fd *opened_file_fd;
-  struct thread *cur = thread_current();
+  int result;
   tid_t tid;
 
   if (!isvalid_address(args)) {
@@ -123,7 +122,35 @@ syscall_handler (struct intr_frame *f UNUSED)
             f->eax = -1;
             pexit(-1);
         }
-        f->eax = process_wait(args[1]);
+        result = process_wait(args[1]);
+        if (result == -2) {
+            f->eax = -1;
+            pexit(-1);
+        }
+        else if (result == -1) {
+            f->eax = -1;
+        }
+        else
+            f->eax = result;
+        break;
+    // project 4
+    case SYS_INUMBER:
+        f->eax = inumber(args[1]);
+        break;
+    case SYS_ISDIR:
+        f->eax = dir_isdir(args[1]);
+        break;
+    case SYS_CHDIR:
+        f->eax = dir_chdir(args[1]);
+        break;
+    case SYS_MKDIR:
+        f->eax = dir_mkdir(args[1]);
+        break;
+    case SYS_READDIR:
+        f->eax = readdir(args[1], args[2]);
+        break;
+    case SYS_TEST_SIMPATH:
+        f->eax = simplify_path(args[1]);
         break;
   }
 }

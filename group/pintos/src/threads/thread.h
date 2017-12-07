@@ -7,6 +7,7 @@
 #include "threads/synch.h"
 #include "threads/fixed-point.h"
 #include "filesys/off_t.h"
+#include "filesys/directory.h"
 
 /* States in a thread's life cycle. */
 enum thread_status
@@ -115,6 +116,8 @@ struct thread
     struct lock fds_lock;
     struct list children;
     struct thread_wait_context *wait_ctx;
+    // Process current working directory
+    char cwd[PATH_MAX];
   };
 
 struct thread_wait_context {
@@ -123,12 +126,14 @@ struct thread_wait_context {
     struct list_elem children_elem;
     struct semaphore finish_sema;
     int exit_status;
+    int waited;
 };
 
 struct file_fd {
     int fd;
     char *fname;
     struct file* f;
+    struct dir* dir;
     off_t offset;
     struct list_elem elem;
 };
