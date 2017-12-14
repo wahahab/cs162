@@ -128,11 +128,11 @@ filesys_open (const char *path)
                 && (dir = get_dir_by_path(dir_path)) != NULL) {
             path_basename(buff, fname);
             dir_lookup(dir, fname, &inode);
+            dir_close(dir);
         }
     }
 
 done:
-    dir_close(dir);
     free(dir_path);
     free(buff);
     return file_open(inode);

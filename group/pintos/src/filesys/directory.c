@@ -368,9 +368,9 @@ get_dir_by_path(const char *path)
             *(fname + j) = '\0';
             if (lookup(dir, fname, &next_dir_entry,
                         &next_dir_ofs)) {
-                dir_inode = inode_open(next_dir_entry.inode_sector);
                 dir_close(dir);
-                dir = dir_open(dir_inode); 
+                dir_inode = inode_open(next_dir_entry.inode_sector);
+                dir = dir_open(dir_inode);
                 j = 0;
             }
             else {
@@ -431,6 +431,8 @@ dir_chdir (const char *path)
 bool
 dir_mkdir(const char *path)
 {
+    if (*path == '\0')
+        return false;
     char *buff;
     char *parent_dir_path;
     char *dirname;
@@ -495,7 +497,7 @@ dir_isdir(int fd)
     return ffd != NULL && ffd->f->inode->data.isdir;
 }
 
-int inumber (fd)
+int inumber (int fd)
 {
     struct file_fd *ffd = NULL;
 

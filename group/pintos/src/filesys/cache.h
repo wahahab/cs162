@@ -19,5 +19,6 @@ struct cache_entry* cache_get(block_sector_t index);
 void cache_update(struct cache_entry *entry,
         int offset, const uint8_t *buffer, int size);
 void cache_set(block_sector_t index, const uint8_t *buffer);
+void cache_flush(void);
 
 #endif

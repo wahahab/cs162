@@ -107,3 +107,16 @@ void write_back(struct cache_entry *ce)
     block_write(fs_device, ce->index, ce->data);
     ce->dirty = 0;
 }
+void cache_flush(void)
+{
+    struct list_elem *e;
+    struct cache_entry *ce;
+
+    while(!list_empty(&cached_blocks))
+    {
+        e = list_pop_front(&cached_blocks);
+        ce = list_entry(e, struct cache_entry, elem);
+        if (ce->dirty)
+            write_back(ce);
+    }
+}
